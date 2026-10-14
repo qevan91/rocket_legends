@@ -43,7 +43,7 @@ next-env.d.ts
 
 # IDE
 .vscode/
-.idea/
+.idea
 
 # Environment Variables
 .env
