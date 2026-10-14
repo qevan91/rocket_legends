@@ -1,492 +1,527 @@
 // app/(game)/career/page.tsx
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
-import Link from 'next/link';
+import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useLanguage } from '@/context/LanguageContext';
-import { createClient } from '@/lib/supabase/client';
-import { useAuth } from '@/context/AuthContext';
-import html2canvas from 'html2canvas';
-import { SEASON_CALENDAR } from '@/lib/engine/seasonEngine';
-import { REGIONAL_PLAYERS, ProPlayer } from '@/lib/data/proPlayers';
+import { CareerSave, Team } from '@/types/game';
+import {
+    acceptTransferOrStay,
+    evaluateEndOfSplitMercato,
+    performWeeklyActivity,
+    WEEKS_PER_SPLIT,
+    WeeklyActivityType,
+} from '@/lib/engine/seasonEngine';
+import { COACH_TRUST_THRESHOLDS } from '@/lib/data/gameData';
 
 export default function CareerHubPage() {
     const router = useRouter();
-    const { language } = useLanguage();
-    const { user } = useAuth();
-    const supabase = createClient();
-    const retirementCardRef = useRef<HTMLDivElement>(null);
+    const [save, setSave] = useState<CareerSave | null>(null);
+    const [trainedThisWeek, setTrainedThisWeek] = useState<boolean>(false);
+    const [bannerMessage, setBannerMessage] = useState<string>('');
+    const [mercatoHeadline, setMercatoHeadline] = useState<string>('');
+    const [wasKickedByCoach, setWasKickedByCoach] = useState<boolean>(false);
 
-    const [loading, setLoading] = useState(true);
-    const [careerId, setCareerId] = useState<string | null>(null);
-
-    // ÉTATS DYNAMIQUES DU JOUEUR (Reçus depuis Supabase)
-    const [profile, setProfile] = useState({
-        firstName: 'Lucas', pseudo: 'Vatira', lastName: 'Lefèvre',
-        age: 16, nationality: 'FR', flag: '🇫🇷',
-        teamName: 'Oxygen Spark', teamLogo: '🟢', teamId: '', region: 'EU',
-        seasonLabel: 'Saison 26/27',
-        level: 12, xp: 0, stars: 3, credits: 1500,
-        matchesPlayed: 14, goals: 12, assists: 8, saves: 10,
-        trophies: { worlds: 0, majors: 0, opens: 0, preSeason: 1, total: 1 },
-        awards: 1, startYear: 2026, endYear: 2034,
-        rosterStatus: 'Titulaire',
-    });
-
-    const [teammates, setTeammates] = useState<ProPlayer[]>([]);
-    const [currentEventIndex, setCurrentEventIndex] = useState(0);
-
-    // MODALES
-    const [showProfileModal, setShowProfileModal] = useState(false);
-    const [showClubModal, setShowClubModal] = useState(false);
-    const [isRetired, setIsRetired] = useState(false);
-
-    // CHARGEMENT DES VRAIES DONNÉES DEPUIS SUPABASE
     useEffect(() => {
-        async function loadData() {
-            if (!user) {
-                setLoading(false);
-                return;
-            }
-
-            try {
-                const { data } = await supabase
-                    .from('careers')
-                    .select('*')
-                    .eq('user_id', user.id)
-                    .single();
-
-                if (data) {
-                    setCareerId(data.id);
-                    const state = data.game_state || {};
-
-                    setProfile(prev => ({
-                        ...prev,
-                        firstName: state.firstName || prev.firstName,
-                        pseudo: state.pseudo || prev.pseudo,
-                        lastName: state.lastName || prev.lastName,
-                        age: state.age || prev.age,
-                        nationality: state.nationality || prev.nationality,
-                        flag: state.flag || prev.flag,
-                        teamName: state.team?.name || state.teamName || prev.teamName,
-                        teamLogo: state.team?.logo || state.teamLogo || prev.teamLogo,
-                        teamId: state.team?.id || '',
-                        region: state.region || prev.region,
-                        seasonLabel: state.seasonLabel || prev.seasonLabel,
-                        level: state.level || prev.level,
-                        xp: state.xp || 0,
-                        stars: state.stars || prev.stars,
-                        credits: data.credits ?? prev.credits,
-                        matchesPlayed: state.matchesPlayed || prev.matchesPlayed,
-                        goals: state.goals || prev.goals,
-                        assists: state.assists || prev.assists,
-                        saves: state.saves || prev.saves,
-                        trophies: state.trophies || prev.trophies,
-                        rosterStatus: state.rosterStatus || prev.rosterStatus,
-                    }));
-
-                    setCurrentEventIndex(state.currentEventIndex || 0);
-
-                    const regionCode = state.region || 'EU';
-                    const playerList = REGIONAL_PLAYERS[regionCode] || [];
-                    const clubMates = playerList.filter(p => p.teamId === state.team?.id);
-                    setTeammates(clubMates.slice(0, 2));
-                }
-            } catch (err) {
-                console.error('Erreur chargement profil :', err);
-            } finally {
-                setLoading(false);
-            }
-        }
-
-        loadData();
-    }, [user]);
-
-    const currentEvent = SEASON_CALENDAR[currentEventIndex] || SEASON_CALENDAR[0];
-
-    const careerScore = Math.min(100, Math.floor(
-        (profile.trophies.worlds * 15) +
-        (profile.trophies.majors * 5) +
-        (profile.level * 0.2) +
-        (profile.matchesPlayed * 0.05)
-    ));
-
-    const handleExportPNG = async () => {
-        if (retirementCardRef.current) {
-            const canvas = await html2canvas(retirementCardRef.current, {
-                scale: 2,
-                backgroundColor: '#6B4A46'
-            });
-            const link = document.createElement('a');
-            link.download = `Legende_${profile.pseudo}.png`;
-            link.href = canvas.toDataURL('image/png');
-            link.click();
-        }
-    };
-
-    const handleRequestTransfer = async () => {
-        if (!currentEvent.allowsMercato) {
-            alert(`⛔ Le marché des transferts est fermé ! Tu ne peux être transféré qu'après un Major ou entre deux saisons.`);
+        const raw = localStorage.getItem('rl_active_save');
+        if (!raw) {
+            router.push('/saves/new');
             return;
         }
+        const loaded: CareerSave = JSON.parse(raw);
 
-        if (!user || !careerId) {
-            alert("Demande de transfert transmise !");
-            setShowClubModal(false);
-            return;
-        }
-
-        try {
-            const { data } = await supabase.from('careers').select('game_state').eq('id', careerId).single();
-            const currentState = data?.game_state || {};
-
-            await supabase.from('careers').update({
-                game_state: { ...currentState, transferRequested: true }
-            }).eq('id', careerId);
-
-            alert("✈️ Demande de transfert transmise à ton agent ! Des offres apparaîtront à l'arène.");
-            setShowClubModal(false);
-        } catch (err) {
-            console.error(err);
-        }
-    };
-
-    // ACTION : TENTER DE BENCH UN COÉQUIPIER
-    const handleTryBenchTeammate = (matePseudo: string) => {
-        const success = Math.random() > 0.4;
-        if (success) {
-            alert(`🔥 Succès ! Le coach a accepté de placer ${matePseudo} sur le banc au profit de la synergie d'équipe.`);
+        // Si on arrive à la semaine 5 (Fin de Split) et que le mercato n'a pas encore été généré
+        if (loaded.week >= WEEKS_PER_SPLIT && !loaded.pendingOffers) {
+            const mercato = evaluateEndOfSplitMercato(loaded);
+            localStorage.setItem('rl_active_save', JSON.stringify(mercato.updatedSave));
+            setSave(mercato.updatedSave);
+            setMercatoHeadline(mercato.headline);
+            setWasKickedByCoach(mercato.wasKicked);
         } else {
-            alert(`⚠️ Échec ! Le coach refuse de mettre ${matePseudo} sur le banc. La tension monte dans le vestiaire (-10 Relation d'Équipe).`);
-        }
-    };
-
-    const handleNextSeason = async () => {
-        const nextAge = profile.age + 1;
-        const nextSeasonLabel = `Saison ${26 + (nextAge - 16)}/${27 + (nextAge - 16)}`;
-
-        if (user && careerId) {
-            try {
-                const { data } = await supabase.from('careers').select('game_state').eq('id', careerId).single();
-                const currentState = data?.game_state || {};
-
-                await supabase.from('careers').update({
-                    game_state: {
-                        ...currentState,
-                        age: nextAge,
-                        seasonLabel: nextSeasonLabel,
-                        currentEventIndex: 0,
-                    }
-                }).eq('id', careerId);
-            } catch (err) {
-                console.error('Erreur changement saison :', err);
+            setSave(loaded);
+            if (loaded.pendingOffers) {
+                const kicked = loaded.gauges.coachTrust < COACH_TRUST_THRESHOLDS.KICKED;
+                setWasKickedByCoach(kicked);
+                setMercatoHeadline(
+                    kicked
+                        ? '🚨 Tu as été écarté du roster par le coach ! Choisis une nouvelle équipe pour rebondir.'
+                        : '📋 Fenêtre de Mercato RLCS ouverte : reste dans ton équipe ou signe ailleurs.'
+                );
             }
         }
+    }, [router]);
 
-        setProfile(prev => ({
-            ...prev,
-            age: nextAge,
-            seasonLabel: nextSeasonLabel,
-        }));
+    if (!save) {
+        return (
+            <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
+                Chargement de ta carrière...
+            </div>
+        );
+    }
 
-        setCurrentEventIndex(0);
-        alert(`🎉 Bienvenue dans la ${nextSeasonLabel} ! Tu as maintenant ${nextAge} ans.`);
+    const currentTeam: Team =
+        save.teams.find((t) => t.id === save.currentTeamId) || save.teams[0];
+
+    const regionalStandings = [...save.teams]
+        .filter((t) => t.region === currentTeam.region)
+        .sort((a, b) => b.rlcsPoints - a.rlcsPoints || b.ovr - a.ovr);
+
+    const handleActivity = (activity: WeeklyActivityType) => {
+        if (trainedThisWeek) {
+            setBannerMessage('ℹ️ Tu as déjà effectué ton activité cette semaine. Lance le match RLCS !');
+            return;
+        }
+        const { updatedSave, feedback } = performWeeklyActivity(save, activity);
+        setSave(updatedSave);
+        localStorage.setItem('rl_active_save', JSON.stringify(updatedSave));
+        setBannerMessage(feedback);
+        setTrainedThisWeek(true);
     };
 
-    if (loading) {
-        return (
-            <div className="min-h-screen bg-vacation-pattern flex items-center justify-center font-body p-4 text-[#6B4A46]" style={{ backgroundColor: '#FFF7EC' }}>
-                <div className="text-xl font-display font-extrabold animate-pulse">Chargement de ta Carrière... 🚀</div>
-            </div>
-        );
-    }
+    const handleMercatoChoice = (targetTeamId: string) => {
+        const { updatedSave, summaryMessage } = acceptTransferOrStay(save, targetTeamId);
+        setSave(updatedSave);
+        localStorage.setItem('rl_active_save', JSON.stringify(updatedSave));
+        setBannerMessage(summaryMessage);
+        setMercatoHeadline('');
+        setWasKickedByCoach(false);
+        setTrainedThisWeek(false);
+    };
 
-    if (isRetired) {
-        return (
-            <div className="min-h-screen bg-vacation-pattern flex flex-col items-center justify-center p-4 font-body select-none" style={{ backgroundColor: '#FFF7EC', color: '#6B4A46' }}>
-                <div
-                    ref={retirementCardRef}
-                    className="max-w-md w-full rounded-[2rem] p-6 shadow-2xl relative overflow-hidden"
-                    style={{ backgroundColor: '#6B4A46', border: '6px solid #FBEAD4' }}
-                >
-                    <div className="absolute top-0 left-1/2 -translate-x-1/2 px-6 py-1.5 rounded-b-xl font-display font-extrabold text-[10px] tracking-widest uppercase text-[#6B4A46]" style={{ backgroundColor: '#FFC94A' }}>
-                        UNE ICÔNE
-                    </div>
-
-                    <div className="mt-8 text-center space-y-4">
-                        <div className="relative inline-flex items-center justify-center w-28 h-28 rounded-full border-4 border-[#FFC94A]/30">
-                            <div className="absolute inset-0 rounded-full border-2 border-dashed border-[#FFC94A] animate-[spin_20s_linear_infinite]" />
-                            <div className="text-center">
-                                <div className="text-[9px] uppercase tracking-wider text-[#FBEAD4] opacity-80">Note Globale</div>
-                                <div className="text-5xl font-display font-extrabold text-[#FFC94A] leading-none">{careerScore}</div>
-                            </div>
-                        </div>
-
-                        <div>
-                            <h1 className="text-3xl font-display font-extrabold text-white flex justify-center items-center gap-2">
-                                <span>{profile.flag}</span> <span>{profile.firstName} {profile.lastName}</span>
-                            </h1>
-                            <p className="text-[#FF8FAE] font-bold text-xs uppercase tracking-wide">
-                                ⚡ Légende du Rocket • {profile.startYear} – {profile.endYear}
-                            </p>
-                        </div>
-
-                        <div className="bg-[#FFF7EC]/10 p-4 rounded-2xl border border-[#FBEAD4]/20 grid grid-cols-3 gap-y-4 gap-x-2 text-center text-white font-display">
-                            <div><div className="text-xl font-extrabold">{profile.matchesPlayed}</div><div className="text-[8px] uppercase text-[#FBEAD4]">Matchs</div></div>
-                            <div><div className="text-xl font-extrabold">{profile.goals}</div><div className="text-[8px] uppercase text-[#FBEAD4]">Buts</div></div>
-                            <div><div className="text-xl font-extrabold">{profile.assists}</div><div className="text-[8px] uppercase text-[#FBEAD4]">Passes Déc.</div></div>
-                            <div><div className="text-xl font-extrabold">{profile.awards}</div><div className="text-[8px] uppercase text-[#FBEAD4]">Distinctions</div></div>
-                            <div><div className="text-xl font-extrabold">{profile.level}</div><div className="text-[8px] uppercase text-[#FBEAD4]">Niveau Max</div></div>
-                            <div><div className="text-xl font-extrabold text-[#5EC2CC]">{profile.credits / 1000} M€</div><div className="text-[8px] uppercase text-[#FBEAD4]">Fortune</div></div>
-                        </div>
-
-                        <div className="text-left space-y-2.5 bg-[#FFF7EC]/10 p-4 rounded-2xl border border-[#FBEAD4]/20 text-sm font-bold text-white">
-                            <div className="flex justify-between items-center border-b border-[#FBEAD4]/20 pb-1.5">
-                                <span className="flex items-center gap-2">👑 <span className="opacity-90">World Champions</span></span>
-                                <span className="bg-[#FFC94A] text-[#6B4A46] px-2 py-0.5 rounded-full text-xs">{profile.trophies.worlds}</span>
-                            </div>
-                            <div className="flex justify-between items-center border-b border-[#FBEAD4]/20 pb-1.5">
-                                <span className="flex items-center gap-2">🏆 <span className="opacity-90">Majors RLCS</span></span>
-                                <span className="bg-white/20 px-2 py-0.5 rounded-full text-xs">{profile.trophies.majors}</span>
-                            </div>
-                            <div className="flex justify-between items-center">
-                                <span className="flex items-center gap-2">🥇 <span className="opacity-90">Regional Opens</span></span>
-                                <span className="bg-white/20 px-2 py-0.5 rounded-full text-xs">{profile.trophies.opens}</span>
-                            </div>
-                        </div>
-
-                        <div className="italic text-[11px] text-[#FBEAD4] leading-relaxed pt-2 opacity-80 px-2">
-                            "Votre nom restera gravé parmi les plus grands. Les joueurs du monde entier porteront vos couleurs pendant des décennies."
-                        </div>
-
-                        <div className="pt-4 border-t border-[#FBEAD4]/20">
-                            <div className="font-display font-extrabold text-[#FF8FAE] tracking-widest text-sm">ROCKET LEGENDS</div>
-                            <div className="text-[8px] text-[#FBEAD4] opacity-60">Écrivez votre propre légende • Edition 2026</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="w-full max-w-md mt-4 flex space-x-2">
-                    <button onClick={handleExportPNG} className="flex-1 py-3 bg-[#5EC2CC] text-white font-display font-bold text-xs uppercase rounded-2xl shadow-md active:scale-95 transition cursor-pointer">
-                        📸 Exporter en PNG
-                    </button>
-                    <button onClick={() => window.location.href = '/'} className="flex-1 py-3 bg-white text-[#6B4A46] font-display font-bold text-xs uppercase rounded-2xl shadow-md border-2 border-[#FBEAD4] active:scale-95 transition cursor-pointer">
-                        Menu Principal
-                    </button>
-                </div>
-            </div>
-        );
-    }
+    const isMercatoWeek = save.week >= WEEKS_PER_SPLIT && !!save.pendingOffers;
 
     return (
-        <div
-            className="min-h-screen bg-vacation-pattern flex flex-col justify-between items-center p-3 sm:p-5 font-body relative select-none"
-            style={{ backgroundColor: '#FFF7EC', color: '#6B4A46' }}
-        >
-            {/* 📋 MODAL PROFIL & PALMARÈS */}
-            {showProfileModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(107, 74, 70, 0.4)', backdropFilter: 'blur(4px)' }}>
-                    <div className="w-full max-w-sm rounded-3xl p-5 space-y-4 shadow-xl bg-white border-4 border-[#FF8FAE]">
-                        <div className="flex justify-between items-center border-b-2 border-[#FBEAD4] pb-2">
-                            <h2 className="text-lg font-display font-extrabold uppercase text-[#6B4A46]">Profil Pro</h2>
-                            <button onClick={() => setShowProfileModal(false)} className="text-[#F1668C] font-extrabold text-xs bg-[#FFF7EC] px-3 py-1 rounded-full border border-[#FBEAD4] cursor-pointer">FERMER</button>
+        <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8">
+            <div className="max-w-6xl mx-auto space-y-6">
+                {/* 1. BARRE SUPÉRIEURE : JOUEUR, CLUB & CALENDRIER */}
+                <header className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div className="flex items-center gap-4">
+                        <div
+                            className="w-14 h-14 rounded-2xl flex items-center justify-center font-black text-xl text-slate-950 shrink-0"
+                            style={{ backgroundColor: currentTeam.logoColor }}
+                        >
+                            {currentTeam.tag}
                         </div>
-
-                        <div className="bg-[#FFF7EC] p-3 rounded-2xl border-2 border-[#FBEAD4] text-center space-y-1">
-                            <div className="text-2xl">{profile.flag}</div>
-                            <div className="font-display font-extrabold text-base text-[#6B4A46]">{profile.firstName} '{profile.pseudo}' {profile.lastName}</div>
-                            <div className="text-xs font-bold text-[#9C7C77]">{profile.age} ans • Région {profile.region}</div>
-                        </div>
-
-                        <div className="grid grid-cols-3 gap-2 text-center font-display font-extrabold text-xs">
-                            <div className="bg-white p-2 rounded-xl border border-[#FBEAD4]"><div className="text-[#5EC2CC] text-lg">{profile.goals}</div><div className="text-[8px] text-[#9C7C77]">BUTS</div></div>
-                            <div className="bg-white p-2 rounded-xl border border-[#FBEAD4]"><div className="text-[#FF8FAE] text-lg">{profile.assists}</div><div className="text-[8px] text-[#9C7C77]">PASSES</div></div>
-                            <div className="bg-white p-2 rounded-xl border border-[#FBEAD4]"><div className="text-[#FFC94A] text-lg">{profile.saves}</div><div className="text-[8px] text-[#9C7C77]">ARRÊTS</div></div>
-                        </div>
-
-                        <div className="space-y-1.5 pt-2 border-t border-[#FBEAD4] text-xs font-bold text-[#6B4A46]">
-                            <div className="flex justify-between"><span>👑 Titres Worlds</span><span className="text-[#FFC94A] font-extrabold">{profile.trophies.worlds}</span></div>
-                            <div className="flex justify-between"><span>🏆 Trophées Major</span><span className="text-[#5EC2CC] font-extrabold">{profile.trophies.majors}</span></div>
-                            <div className="flex justify-between"><span>🥇 Victoires Open</span><span className="text-[#F1668C] font-extrabold">{profile.trophies.opens}</span></div>
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <h1 className="text-2xl font-black text-white">{save.player.gamertag}</h1>
+                                <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-slate-950">
+                  OVR {save.player.ovr}
+                </span>
+                                <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 uppercase">
+                  {save.player.role}
+                </span>
+                            </div>
+                            <p className="text-sm text-slate-400 mt-0.5">
+                                {currentTeam.name} (Tier {currentTeam.tier} • {currentTeam.region}) •{' '}
+                                {save.player.age} ans • Salaire : {save.monthlySalary}€/mois
+                            </p>
                         </div>
                     </div>
-                </div>
-            )}
 
-            {/* 🤝 MODAL CLUB & COÉQUIPIERS */}
-            {showClubModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(107, 74, 70, 0.4)', backdropFilter: 'blur(4px)' }}>
-                    <div className="w-full max-w-sm rounded-3xl p-5 space-y-4 shadow-xl bg-white border-4 border-[#FFC94A]">
-                        <div className="flex justify-between items-center border-b-2 border-[#FBEAD4] pb-2">
-                            <div className="flex items-center space-x-2">
-                                <span className="text-2xl">{profile.teamLogo}</span>
-                                <h2 className="text-lg font-display font-extrabold uppercase text-[#6B4A46]">{profile.teamName}</h2>
-                            </div>
-                            <button onClick={() => setShowClubModal(false)} className="text-[#F1668C] font-extrabold text-xs bg-[#FFF7EC] px-3 py-1 rounded-full border border-[#FBEAD4] cursor-pointer">FERMER</button>
+                    <div className="flex flex-wrap items-center gap-3">
+                        <div className="bg-slate-950 border border-slate-800 px-4 py-2 rounded-xl text-center">
+                            <span className="text-[11px] uppercase text-slate-400 block">Calendrier</span>
+                            <span className="font-bold text-amber-400 text-sm">
+                Saison {save.season} • Split {save.split}/3 • Semaine {save.week}/{WEEKS_PER_SPLIT}
+              </span>
                         </div>
 
-                        <div className="bg-[#FFF7EC] p-3 rounded-2xl border-2 border-[#FBEAD4] text-center">
-                            <div className="text-[10px] font-bold uppercase text-[#9C7C77]">Ton Statut</div>
-                            <div className="text-sm font-display font-extrabold text-[#5EC2CC]">🟢 {profile.rosterStatus.toUpperCase()}</div>
+                        <div className="bg-slate-950 border border-slate-800 px-4 py-2 rounded-xl text-center">
+                            <span className="text-[11px] uppercase text-slate-400 block">Banque</span>
+                            <span className="font-bold text-emerald-400 text-sm">{save.money} €</span>
+                        </div>
+
+                        <button
+                            onClick={() => router.push('/saves/new')}
+                            className="px-3 py-2 rounded-xl text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                        >
+                            Nouvelle Partie
+                        </button>
+                    </div>
+                </header>
+
+                {/* NOTIFICATION / FEEDBACK */}
+                {bannerMessage && (
+                    <div className="bg-amber-500/10 border border-amber-500/40 text-amber-200 px-4 py-3 rounded-xl text-sm font-medium">
+                        {bannerMessage}
+                    </div>
+                )}
+
+                {/* 2. LES 3 JAUGES CLÉS + STATISTIQUES DU JOUEUR */}
+                <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Jauges d'état */}
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                        <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400">
+                            État de forme & Confiance du Coach
+                        </h2>
+
+                        {/* Énergie */}
+                        <div>
+                            <div className="flex justify-between text-xs mb-1">
+                                <span className="text-slate-300 font-semibold">⚡ Énergie</span>
+                                <span className="font-mono font-bold text-sky-400">{save.gauges.energy}/100</span>
+                            </div>
+                            <div className="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-sky-500 transition-all"
+                                    style={{ width: `${save.gauges.energy}%` }}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Feeling */}
+                        <div>
+                            <div className="flex justify-between text-xs mb-1">
+                <span className="text-slate-300 font-semibold">
+                  🔥 Feeling (Bonus de réussite en match)
+                </span>
+                                <span className="font-mono font-bold text-amber-400">
+                  {save.gauges.feeling}/100
+                </span>
+                            </div>
+                            <div className="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-amber-400 transition-all"
+                                    style={{ width: `${save.gauges.feeling}%` }}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Confiance du Coach */}
+                        <div>
+                            <div className="flex justify-between text-xs mb-1">
+                <span className="text-slate-300 font-semibold">
+                  👔 Confiance de {currentTeam.coachName} (&lt;30 = Viré en fin de Split)
+                </span>
+                                <span
+                                    className={`font-mono font-bold ${
+                                        save.gauges.coachTrust < 35 ? 'text-red-400' : 'text-emerald-400'
+                                    }`}
+                                >
+                  {save.gauges.coachTrust}/100
+                </span>
+                            </div>
+                            <div className="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden">
+                                <div
+                                    className={`h-full transition-all ${
+                                        save.gauges.coachTrust < 35 ? 'bg-red-500' : 'bg-emerald-500'
+                                    }`}
+                                    style={{ width: `${save.gauges.coachTrust}%` }}
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Attributs du Triangle Tactique */}
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between">
+                        <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400 mb-3">
+                            Attributs Rocket League & Bilan
+                        </h2>
+
+                        <div className="grid grid-cols-3 gap-3 text-center">
+                            <div className="bg-purple-950/40 border border-purple-700/50 p-3 rounded-xl">
+                                <span className="text-xs text-purple-300 block">Mécanique</span>
+                                <span className="text-2xl font-black text-white">
+                  {save.player.stats.mechanics}
+                </span>
+                            </div>
+                            <div className="bg-blue-950/40 border border-blue-700/50 p-3 rounded-xl">
+                                <span className="text-xs text-blue-300 block">Équipe</span>
+                                <span className="text-2xl font-black text-white">
+                  {save.player.stats.teamplay}
+                </span>
+                            </div>
+                            <div className="bg-emerald-950/40 border border-emerald-700/50 p-3 rounded-xl">
+                                <span className="text-xs text-emerald-300 block">Défense</span>
+                                <span className="text-2xl font-black text-white">
+                  {save.player.stats.defense}
+                </span>
+                            </div>
+                        </div>
+
+                        <div className="mt-4 pt-3 border-t border-slate-800 flex justify-between text-xs text-slate-400">
+              <span>
+                Matchs :{' '}
+                  <strong className="text-white">
+                  {save.careerHistory.matchesWon}V /{' '}
+                      {save.careerHistory.matchesPlayed - save.careerHistory.matchesWon}D
+                </strong>
+              </span>
+                            <span>
+                Buts : <strong className="text-white">{save.careerHistory.goals}</strong>
+              </span>
+                            <span>
+                Passes : <strong className="text-white">{save.careerHistory.assists}</strong>
+              </span>
+                            <span>
+                Saves : <strong className="text-white">{save.careerHistory.saves}</strong>
+              </span>
+                        </div>
+                    </div>
+                </section>
+
+                {/* 3. FENÊTRE DE MERCATO / RENVOI (SEMAINE 5) OU PROGRAMME DE LA SEMAINE */}
+                {isMercatoWeek ? (
+                    <section
+                        className={`rounded-2xl p-6 border-2 space-y-5 ${
+                            wasKickedByCoach
+                                ? 'bg-red-950/30 border-red-500'
+                                : 'bg-slate-900 border-amber-400'
+                        }`}
+                    >
+                        <div>
+              <span className="text-xs font-black uppercase px-3 py-1 rounded-full bg-amber-400 text-slate-950">
+                Fin du Split {save.split} • Mercato Officiel RLCS
+              </span>
+                            <h2 className="text-xl font-black text-white mt-3">{mercatoHeadline}</h2>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            {/* Option 1 : Rester dans son équipe (UNIQUMENT SI LE COACH NE T'A PAS VIRÉ) */}
+                            {!wasKickedByCoach && (
+                                <div className="bg-slate-950 border-2 border-emerald-500/70 rounded-xl p-4 flex flex-col justify-between">
+                                    <div>
+                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-emerald-600 text-white">
+                      Prolongation
+                    </span>
+                                        <h3 className="text-lg font-bold text-white mt-2">{currentTeam.name}</h3>
+                                        <p className="text-xs text-slate-400">
+                                            Tier {currentTeam.tier} • OVR {currentTeam.ovr} • Salaire :{' '}
+                                            {save.monthlySalary}€/mois
+                                        </p>
+                                        <p className="text-xs text-slate-300 mt-3">
+                                            Conserve la synergie actuelle et les points RLCS acquis avec tes coéquipiers.
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => handleMercatoChoice(currentTeam.id)}
+                                        className="mt-4 w-full py-2.5 rounded-lg font-bold text-xs bg-emerald-500 hover:bg-emerald-400 text-slate-950 cursor-pointer"
+                                    >
+                                        Rester chez {currentTeam.tag} →
+                                    </button>
+                                </div>
+                            )}
+
+                            {/* Offres des autres clubs */}
+                            {save.pendingOffers?.map((offer) => (
+                                <div
+                                    key={offer.teamId}
+                                    className="bg-slate-950 border border-slate-700 hover:border-amber-400 rounded-xl p-4 flex flex-col justify-between transition"
+                                >
+                                    <div>
+                    <span
+                        className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
+                            offer.reason === 'promotion'
+                                ? 'bg-amber-400 text-slate-950'
+                                : offer.reason === 'rebound_after_kick'
+                                    ? 'bg-red-500 text-white'
+                                    : 'bg-blue-600 text-white'
+                        }`}
+                    >
+                      {offer.reason === 'promotion'
+                          ? '🔥 Promotion'
+                          : offer.reason === 'rebound_after_kick'
+                              ? 'Contrat de Rebond'
+                              : 'Transfert'}
+                    </span>
+                                        <h3 className="text-lg font-bold text-white mt-2">{offer.teamName}</h3>
+                                        <p className="text-xs text-slate-400">
+                                            Tier {offer.teamTier} • OVR {offer.teamOvr} • Statut : Titulaire
+                                        </p>
+                                        <p className="text-xs text-emerald-400 font-semibold mt-2">
+                                            Salaire proposé : {offer.monthlySalary}€ / mois
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => handleMercatoChoice(offer.teamId)}
+                                        className="mt-4 w-full py-2.5 rounded-lg font-bold text-xs bg-amber-400 hover:bg-amber-300 text-slate-950 cursor-pointer"
+                                    >
+                                        Signer chez {offer.teamName} →
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    </section>
+                ) : (
+                    /* PROGRAMME NORMAL DE LA SEMAINE (ENTRAÎNEMENT + MATCH) */
+                    <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        {/* 4 Actions d'entraînement de la semaine */}
+                        <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+                            <div className="flex items-center justify-between">
+                                <h2 className="text-base font-bold text-white">
+                                    1. Choisis ton activité de la semaine
+                                </h2>
+                                <span className="text-xs text-slate-400">
+                  {trainedThisWeek ? '✓ Activité terminée' : '1 activité dispo avant le match'}
+                </span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <button
+                                    disabled={trainedThisWeek}
+                                    onClick={() => handleActivity('ranked')}
+                                    className="text-left p-4 rounded-xl border border-slate-800 bg-slate-950/70 hover:border-purple-500 disabled:opacity-40 transition cursor-pointer"
+                                >
+                                    <div className="font-bold text-white text-sm">🎮 Grind Ranked (Solo/Duo)</div>
+                                    <div className="text-xs text-slate-400 mt-1">
+                                        Travailler tes mécaniques en classé SSL.
+                                    </div>
+                                    <div className="text-[11px] text-purple-400 font-semibold mt-2">
+                                        +2 Méca • +1 Défense • +5 Feeling • -15 Énergie
+                                    </div>
+                                </button>
+
+                                <button
+                                    disabled={trainedThisWeek}
+                                    onClick={() => handleActivity('scrims')}
+                                    className="text-left p-4 rounded-xl border border-slate-800 bg-slate-950/70 hover:border-blue-500 disabled:opacity-40 transition cursor-pointer"
+                                >
+                                    <div className="font-bold text-white text-sm">🤝 Scrims & Analyse Coach</div>
+                                    <div className="text-xs text-slate-400 mt-1">
+                                        Travailler les rotations 3v3 avec {currentTeam.coachName}.
+                                    </div>
+                                    <div className="text-[11px] text-blue-400 font-semibold mt-2">
+                                        +2 Équipe • +1 Défense • +6 Confiance Coach • -15 Énergie
+                                    </div>
+                                </button>
+
+                                <button
+                                    disabled={trainedThisWeek}
+                                    onClick={() => handleActivity('stream')}
+                                    className="text-left p-4 rounded-xl border border-slate-800 bg-slate-950/70 hover:border-amber-500 disabled:opacity-40 transition cursor-pointer"
+                                >
+                                    <div className="font-bold text-white text-sm">🎥 Streamer sur Twitch</div>
+                                    <div className="text-xs text-slate-400 mt-1">
+                                        Gagner en confiance et encaisser des dons/subs.
+                                    </div>
+                                    <div className="text-[11px] text-amber-400 font-semibold mt-2">
+                                        +350 € • +6 Feeling • -10 Énergie
+                                    </div>
+                                </button>
+
+                                <button
+                                    disabled={trainedThisWeek}
+                                    onClick={() => handleActivity('rest')}
+                                    className="text-left p-4 rounded-xl border border-slate-800 bg-slate-950/70 hover:border-emerald-500 disabled:opacity-40 transition cursor-pointer"
+                                >
+                                    <div className="font-bold text-white text-sm">😴 Repos & Vie Perso</div>
+                                    <div className="text-xs text-slate-400 mt-1">
+                                        Recharger les batteries avant l&apos;Open Régional.
+                                    </div>
+                                    <div className="text-[11px] text-emerald-400 font-semibold mt-2">
+                                        +35 Énergie • +8 Feeling
+                                    </div>
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Carte de lancement du Match RLCS */}
+                        <div className="bg-gradient-to-b from-amber-500/20 to-slate-900 border border-amber-500/50 rounded-2xl p-6 flex flex-col justify-between">
+                            <div>
+                <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                  2. Compétition du Week-End
+                </span>
+                                <h3 className="text-xl font-black text-white mt-1">
+                                    Open Régional {currentTeam.region} • Semaine {save.week}
+                                </h3>
+                                <p className="text-xs text-slate-300 mt-2">
+                                    Joue ton match officiel avec <strong>3 choix décisifs maximum</strong>. Gagne des points RLCS et fais monter la confiance de ton coach !
+                                </p>
+                            </div>
+
+                            <button
+                                onClick={() => router.push('/match')}
+                                className="mt-6 w-full py-4 rounded-xl font-black text-slate-950 bg-amber-400 hover:bg-amber-300 transition shadow-lg cursor-pointer"
+                            >
+                                ⚽ Jouer le Match RLCS →
+                            </button>
+                        </div>
+                    </section>
+                )}
+
+                {/* 4. ROSTER ACTUEL & CLASSEMENT RLCS DE LA RÉGION */}
+                <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Roster 3v3 */}
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+                        <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400 mb-4">
+                            Roster {currentTeam.name} (OVR {currentTeam.ovr})
+                        </h2>
+                        <div className="space-y-2.5">
+                            {currentTeam.roster.slice(0, 3).map((mate) => (
+                                <div
+                                    key={mate.id}
+                                    className={`p-3 rounded-xl border flex items-center justify-between ${
+                                        mate.isUser
+                                            ? 'bg-amber-500/10 border-amber-500/40'
+                                            : 'bg-slate-950/60 border-slate-800'
+                                    }`}
+                                >
+                                    <div>
+                    <span className="font-bold text-white text-sm">
+                      {mate.gamertag} {mate.isUser && ' (Toi)'}
+                    </span>
+                                        <span className="block text-xs text-slate-400 uppercase">
+                      Titulaire • Rôle : {mate.role}
+                    </span>
+                                    </div>
+                                    <div className="text-right">
+                    <span className="font-mono font-bold text-amber-400 text-sm">
+                      OVR {mate.ovr}
+                    </span>
+                                        <span className="block text-[11px] text-slate-400">
+                      M:{mate.stats.mechanics} E:{mate.stats.teamplay} D:{mate.stats.defense}
+                    </span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Classement RLCS Régional */}
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+                        <div className="flex items-center justify-between mb-4">
+                            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400">
+                                Classement RLCS ({currentTeam.region})
+                            </h2>
+                            <span className="text-xs text-slate-400">Top 5 = Qualif Majeur/Worlds</span>
                         </div>
 
                         <div className="space-y-2">
-                            <div className="text-[10px] font-bold uppercase text-[#9C7C77] pl-1">Coéquipiers Titulaires</div>
-                            <div className="space-y-2">
-                                {teammates.length > 0 ? teammates.map((mate) => (
-                                    <div key={mate.id} className="bg-white p-2.5 rounded-2xl border-2 border-[#FBEAD4] flex justify-between items-center shadow-sm">
-                                        <div>
-                                            <div className="font-display font-extrabold text-xs text-[#6B4A46]">🎮 {mate.pseudo} ({mate.nationality})</div>
-                                            <div className="text-[10px] text-[#9C7C77] font-bold">{mate.age} ans • LVL: {mate.level} | POT: {mate.potential}</div>
+                            {regionalStandings.map((team, idx) => {
+                                const isMyTeam = team.id === currentTeam.id;
+                                return (
+                                    <div
+                                        key={team.id}
+                                        className={`px-3 py-2.5 rounded-xl flex items-center justify-between text-xs border ${
+                                            isMyTeam
+                                                ? 'bg-amber-500/10 border-amber-500/50 text-white font-bold'
+                                                : 'bg-slate-950/50 border-slate-800/80 text-slate-300'
+                                        }`}
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <span className="font-mono w-5 text-slate-400">#{idx + 1}</span>
+                                            <span
+                                                className="px-2 py-0.5 rounded font-black text-[10px] text-slate-950"
+                                                style={{ backgroundColor: team.logoColor }}
+                                            >
+                        {team.tag}
+                      </span>
+                                            <span>{team.name}</span>
+                                            <span className="text-[10px] text-slate-500">Tier {team.tier}</span>
                                         </div>
-                                        <button
-                                            onClick={() => handleTryBenchTeammate(mate.pseudo)}
-                                            className="px-2 py-1 text-[9px] font-display font-extrabold uppercase bg-[#FFF7EC] text-[#F1668C] border border-[#FBEAD4] rounded-lg cursor-pointer hover:bg-[#FF8FAE] hover:text-white transition"
-                                        >
-                                            🛋️ Bench
-                                        </button>
+                                        <div className="flex items-center gap-4">
+                                            <span className="text-slate-400">OVR {team.ovr}</span>
+                                            <span className="font-mono font-bold text-amber-400">
+                        {team.rlcsPoints} pts
+                      </span>
+                                        </div>
                                     </div>
-                                )) : (
-                                    profile.teammates.map((mateName, idx) => (
-                                        <div key={idx} className="bg-white p-2.5 rounded-xl border-2 border-[#FBEAD4] flex justify-between items-center text-xs font-bold text-[#6B4A46]">
-                                            <span>🎮 {mateName}</span>
-                                            <button onClick={() => handleTryBenchTeammate(mateName)} className="text-[9px] text-[#F1668C] border border-[#FBEAD4] px-2 py-0.5 rounded cursor-pointer">🛋️ Bench</button>
-                                        </div>
-                                    ))
-                                )}
-                            </div>
-                        </div>
-
-                        <div className="pt-2 border-t border-[#FBEAD4]">
-                            <button
-                                onClick={handleRequestTransfer}
-                                disabled={!currentEvent.allowsMercato}
-                                className="w-full py-2.5 text-white font-display font-bold text-xs uppercase rounded-xl shadow-md transition active:scale-95 disabled:opacity-50 cursor-pointer"
-                                style={{ backgroundColor: currentEvent.allowsMercato ? '#FF8FAE' : '#9C7C77' }}
-                            >
-                                {currentEvent.allowsMercato ? '✈️ Demander son transfert (Mercato Ouvert)' : '🔒 Mercato Fermé'}
-                            </button>
+                                );
+                            })}
                         </div>
                     </div>
-                </div>
-            )}
-
-            {/* HEADER NAVBAR DYNAMIQUE */}
-            <header className="w-full max-w-md space-y-2 pt-2">
-                <div className="bg-white border-2 border-[#FBEAD4] text-[#6B4A46] px-4 py-2.5 rounded-2xl flex justify-between items-center text-xs shadow-sm font-bold">
-                    <div className="flex items-center space-x-2 bg-[#FFF7EC] px-3 py-1 rounded-full text-xs font-bold border border-[#FBEAD4]">
-                        <span>{profile.teamLogo}</span>
-                        <span>{profile.teamName}</span>
-                    </div>
-                    <div>{profile.firstName} <span className="text-[#F1668C]">'{profile.pseudo}'</span></div>
-                    <div className="text-[11px] text-[#9C7C77]">{profile.flag} {profile.age} ans</div>
-                </div>
-
-                <div className="grid grid-cols-6 gap-2 text-[10px] font-bold">
-                    <div className="col-span-1 bg-white border-2 border-[#8FE0C4] text-[#4FBE99] py-2 rounded-2xl flex items-center justify-center font-mono">
-                        💰{profile.credits / 1000}k
-                    </div>
-
-                    <div className="col-span-1 bg-white border-2 border-[#C6A6E8] text-[#A87BDB] py-2 rounded-2xl flex items-center justify-center font-mono">
-                        LVL {profile.level}
-                    </div>
-
-                    <button
-                        onClick={() => setShowProfileModal(true)}
-                        className="col-span-1 bg-white hover:bg-[#FFF7EC] text-[#6B4A46] py-2 rounded-2xl flex items-center justify-center font-display font-extrabold uppercase shadow-sm border-2 border-[#FF8FAE] cursor-pointer transition"
-                    >
-                        📋 PROF
-                    </button>
-
-                    <Link
-                        href="/standings"
-                        className="col-span-1 bg-white hover:bg-[#FFF7EC] text-[#5EC2CC] py-2 rounded-2xl flex items-center justify-center font-display font-extrabold uppercase shadow-sm border-2 border-[#5EC2CC] cursor-pointer transition"
-                    >
-                        🏆 CLAS
-                    </Link>
-
-                    <button
-                        onClick={() => setShowClubModal(true)}
-                        className="col-span-1 bg-white hover:bg-[#FFF7EC] text-[#F0A80F] py-2 rounded-2xl flex items-center justify-center font-display font-extrabold uppercase shadow-sm border-2 border-[#FFC94A] cursor-pointer transition"
-                    >
-                        🤝 CLUB
-                    </button>
-
-                    {profile.age >= 24 ? (
-                        <button
-                            onClick={() => setIsRetired(true)}
-                            className="col-span-1 bg-[#6B4A46] text-[#FFC94A] py-2 rounded-2xl flex items-center justify-center font-display font-extrabold uppercase shadow-sm border-2 border-[#6B4A46] cursor-pointer transition"
-                        >
-                            🚪 EXIT
-                        </button>
-                    ) : (
-                        <div className="col-span-1 bg-white border-2 border-[#FFC94A] text-[#F0A80F] py-2 rounded-2xl flex items-center justify-center tracking-tighter">
-                            {'★'.repeat(profile.stars)}
-                        </div>
-                    )}
-                </div>
-
-                {/* FRISE DU CALENDRIER DE SAISON */}
-                <div className="bg-white p-3 rounded-2xl border-2 border-[#FBEAD4] shadow-sm mt-2 flex items-center overflow-x-auto scrollbar-hide space-x-3">
-                    {SEASON_CALENDAR.map((event, idx) => (
-                        <div key={event.id} className="flex flex-col items-center min-w-[75px]">
-                            <div
-                                className="w-4 h-4 rounded-full border-2 z-10 transition-all"
-                                style={{
-                                    backgroundColor: idx < currentEventIndex ? '#5EC2CC' : idx === currentEventIndex ? '#FF8FAE' : '#FFF7EC',
-                                    borderColor: idx <= currentEventIndex ? '#ffffff' : '#FBEAD4',
-                                    boxShadow: idx === currentEventIndex ? '0 0 0 2px #FF8FAE' : 'none'
-                                }}
-                            />
-                            <span
-                                className="text-[8px] font-bold mt-1 text-center leading-tight truncate w-full"
-                                style={{ color: idx === currentEventIndex ? '#F1668C' : '#9C7C77' }}
-                            >
-                                {event.name}
-                            </span>
-                        </div>
-                    ))}
-                </div>
-            </header>
-
-            {/* MAIN CARD */}
-            <main className="w-full max-w-md my-auto py-4 space-y-4">
-                <div className="bg-white border-4 border-[#FF8FAE] rounded-3xl p-6 shadow-md text-center space-y-5">
-                    <div className="text-4xl">{currentEvent.type === 'major' || currentEvent.type === 'worlds' ? '🌍' : '🏟️'}</div>
-
-                    <div>
-                        <span className="bg-[#FFF7EC] text-[#F1668C] border border-[#FBEAD4] px-3 py-1 rounded-full text-[10px] font-display font-bold uppercase">
-                            Étape {currentEventIndex + 1} / 9
-                        </span>
-                        <h2 className="text-xl font-display font-extrabold uppercase text-[#6B4A46] pt-2">{currentEvent.name}</h2>
-                        <p className="text-xs font-bold pt-1 text-[#9C7C77]">
-                            {currentEvent.type === 'major' ? "Matchs internationaux contre les champions du monde !" : "Marque des points décisifs pour la qualification au Major."}
-                        </p>
-                    </div>
-
-                    {currentEventIndex >= SEASON_CALENDAR.length ? (
-                        <button
-                            onClick={handleNextSeason}
-                            className="w-full py-4 text-white font-display font-extrabold text-sm uppercase rounded-2xl shadow-md transition active:scale-95 cursor-pointer bg-[#5EC2CC]"
-                        >
-                            PASSER À LA SAISON SUIVANTE ➔
-                        </button>
-                    ) : (
-                        <button
-                            onClick={() => router.push('/match')}
-                            className="w-full py-4 text-white font-display font-extrabold text-sm uppercase rounded-2xl shadow-md transition active:scale-95 cursor-pointer"
-                            style={{ backgroundColor: '#FF8FAE' }}
-                        >
-                            ENTRER DANS L'ARÈNE ➔
-                        </button>
-                    )}
-                </div>
-            </main>
-
-            <footer className="text-[10px] text-[#9C7C77] font-bold">
-                Rocket Legends Mobile • {profile.seasonLabel}
-            </footer>
+                </section>
+            </div>
         </div>
     );
 }

@@ -1,126 +1,304 @@
 // lib/engine/seasonEngine.ts
-import { TeamOption, RegionKey } from '../data/gameData';
-import { ALL_PLAYERS, ProPlayer } from '../data/proPlayers';
+import {
+    CareerSave,
+    Team,
+    TeamTier,
+    TransferOffer,
+} from '@/types/game';
+import {
+    calculatePlayerOvr,
+    COACH_TRUST_THRESHOLDS,
+} from '@/lib/data/gameData';
 
-export const TOURNAMENT_RANKS = [
-    '1st', '2nd', '3rd-4th', '3rd-4th',
-    '5-8th', '5-8th', '5-8th', '5-8th',
-    '9-11th', '9-11th', '9-11th',
-    '12-16th', '12-16th', '12-16th', '12-16th', '12-16th'
-];
+export type WeeklyActivityType = 'ranked' | 'scrims' | 'stream' | 'rest';
 
-export interface CalendarEvent {
-    id: string;
-    name: string;
-    type: 'open' | 'major' | 'worlds';
-    allowsMercato: boolean;
-}
+export const WEEKS_PER_SPLIT = 5; // 4 semaines de compétition + Semaine 5 = Mercato / Fin de Split
 
-export const SEASON_CALENDAR: CalendarEvent[] = [
-    { id: 'regional_1', name: 'RLCS Regional Open 1', type: 'open', allowsMercato: false },
-    { id: 'regional_2', name: 'RLCS Regional Open 2', type: 'open', allowsMercato: false },
-    { id: 'regional_3', name: 'RLCS Regional Open 3', type: 'open', allowsMercato: false },
-    { id: 'major_1', name: 'RLCS Major 1 (International)', type: 'major', allowsMercato: true },
-    { id: 'regional_4', name: 'RLCS Regional Open 4', type: 'open', allowsMercato: false },
-    { id: 'regional_5', name: 'RLCS Regional Open 5', type: 'open', allowsMercato: false },
-    { id: 'regional_6', name: 'RLCS Regional Open 6', type: 'open', allowsMercato: false },
-    { id: 'major_2', name: 'RLCS Major 2 (International)', type: 'major', allowsMercato: false },
-    { id: 'worlds', name: 'Championnats du Monde (Worlds)', type: 'worlds', allowsMercato: true },
-];
+/**
+ * Exécute l'activité hebdomadaire choisie par le joueur avant son match
+ */
+export function performWeeklyActivity(
+    save: CareerSave,
+    activity: WeeklyActivityType
+): { updatedSave: CareerSave; feedback: string } {
+    const stats = { ...save.player.stats };
+    const gauges = { ...save.gauges };
+    let money = save.money;
+    let feedback = '';
 
-export interface TournamentResult {
-    teamId: string;
-    rank: string;
-    goalsScored: number;
-}
-
-export interface TournamentAwards {
-    winningTeam: { name: string; logo: string };
-    mvp: { pseudo: string; teamName: string; rating: number };
-    topScorer: { pseudo: string; teamName: string; goals: number };
-    topPlaymaker: { pseudo: string; teamName: string; assists: number };
-}
-
-function getTeamPowerScore(tier: string): number {
-    const randomFactor = Math.random() * 30;
-    switch (tier) {
-        case 'Worlds Contender': return 85 + randomFactor;
-        case 'Elite': return 70 + randomFactor;
-        case 'Underdog': return 45 + randomFactor;
-        case 'Bubble': return 20 + randomFactor;
-        default: return 50 + randomFactor;
-    }
-}
-
-export function simulateRegionalTournament(
-    regionTeams: TeamOption[],
-    playerTeamId: string,
-    playerRank: string
-): TournamentResult[] {
-    const availableRanks = [...TOURNAMENT_RANKS];
-    const playerRankIndex = availableRanks.indexOf(playerRank);
-    if (playerRankIndex > -1) {
-        availableRanks.splice(playerRankIndex, 1);
+    if (activity !== 'rest' && gauges.energy < 15) {
+        return {
+            updatedSave: save,
+            feedback: '⚠️ Tu es épuisé ! Choisis "Repos" avant de pouvoir t’entraîner.',
+        };
     }
 
-    const botTeams = regionTeams.filter(t => t.id !== playerTeamId);
+    switch (activity) {
+        case 'ranked': {
+            // Grind Solo/Duo Ranked : booste les mécaniques et la défense
+            stats.mechanics = Math.min(99, stats.mechanics + 2);
+            stats.defense = Math.min(99, stats.defense + 1);
+            gauges.energy = Math.max(0, gauges.energy - 15);
+            gauges.feeling = Math.min(100, gauges.feeling + 5);
+            feedback = '🔥 Grosse session de Grind Ranked ! (+2 Mécanique, +1 Défense, +5 Feeling, -15 Énergie)';
+            break;
+        }
+        case 'scrims': {
+            // Scrims avec l'équipe : booste le jeu d'équipe et la confiance du coach
+            stats.teamplay = Math.min(99, stats.teamplay + 2);
+            stats.defense = Math.min(99, stats.defense + 1);
+            gauges.energy = Math.max(0, gauges.energy - 15);
+            gauges.coachTrust = Math.min(100, gauges.coachTrust + 6);
+            feedback = '🤝 Scrims solides avec tes mates ! (+2 Équipe, +1 Défense, +6 Confiance Coach, -15 Énergie)';
+            break;
+        }
+        case 'stream': {
+            // Stream : rapporte de l'argent et du feeling
+            money += 350;
+            gauges.energy = Math.max(0, gauges.energy - 10);
+            gauges.feeling = Math.min(100, gauges.feeling + 6);
+            feedback = '🎥 Super stream devant la commu ! (+350€, +6 Feeling, -10 Énergie)';
+            break;
+        }
+        case 'rest': {
+            // Repos : recharge l'énergie et le moral
+            gauges.energy = Math.min(100, gauges.energy + 35);
+            gauges.feeling = Math.min(100, gauges.feeling + 8);
+            feedback = '😴 Semaine de récupération bien méritée ! (+35 Énergie, +8 Feeling)';
+            break;
+        }
+    }
 
-    const simulatedTeams = botTeams.map(team => ({
-        team,
-        powerScore: getTeamPowerScore(team.tier)
-    })).sort((a, b) => b.powerScore - a.powerScore);
+    const newOvr = calculatePlayerOvr(stats, save.player.role);
+    const updatedPlayer = {
+        ...save.player,
+        stats,
+        ovr: newOvr,
+    };
 
-    const results: TournamentResult[] = [
-        { teamId: playerTeamId, rank: playerRank, goalsScored: getGoalsByRank(playerRank) }
-    ];
-
-    simulatedTeams.forEach((bot, index) => {
-        const assignedRank = availableRanks[index] || '12-16th';
-        results.push({
-            teamId: bot.team.id,
-            rank: assignedRank,
-            goalsScored: getGoalsByRank(assignedRank)
-        });
+    // Mettre à jour le joueur dans le roster de son équipe actuelle
+    const updatedTeams = save.teams.map((team) => {
+        if (team.id !== save.currentTeamId) return team;
+        const newRoster = team.roster.map((p) => (p.isUser ? updatedPlayer : p));
+        const starters = newRoster.slice(0, 3);
+        const avgOvr = Math.round(
+            starters.reduce((sum, p) => sum + p.ovr, 0) / starters.length
+        );
+        return { ...team, roster: newRoster, ovr: avgOvr };
     });
 
-    return results;
-}
-
-function getGoalsByRank(rank: string): number {
-    const baseGoals: Record<string, number> = {
-        '1st': 35, '2nd': 28, '3rd-4th': 20, '5-8th': 14, '9-11th': 8, '12-16th': 4
+    return {
+        updatedSave: {
+            ...save,
+            updatedAt: new Date().toISOString(),
+            money,
+            player: updatedPlayer,
+            gauges,
+            teams: updatedTeams,
+        },
+        feedback,
     };
-    return (baseGoals[rank] || 5) + Math.floor(Math.random() * 6);
 }
 
 /**
- * Génère les Distinctions Individuelles du Tournoi
+ * Génère le bilan de fin de Split (Semaine 5) :
+ * - Vérifie si le coach IA vire le joueur (coachTrust < 30)
+ * - Génère des offres de transfert cohérentes avec l'OVR et la réputation du joueur
  */
-export function generateTournamentAwards(
-    regionTeams: TeamOption[],
-    playerRank: string,
-    playerPseudo: string,
-    playerTeamName: string,
-    playerGoals: number,
-    playerRating: number
-): TournamentAwards {
-    // Équipe gagnante
-    const winnerTeam = playerRank === '1st'
-        ? { name: playerTeamName, logo: '🏆' }
-        : {
-            name: regionTeams.find(t => t.tier === 'Worlds Contender' || t.tier === 'Elite')?.name || 'Blue Wall Corp',
-            logo: regionTeams.find(t => t.tier === 'Worlds Contender' || t.tier === 'Elite')?.logo || '🟦'
-        };
+export function evaluateEndOfSplitMercato(save: CareerSave): {
+    updatedSave: CareerSave;
+    wasKicked: boolean;
+    headline: string;
+} {
+    const currentTeam = save.teams.find((t) => t.id === save.currentTeamId)!;
+    const trust = save.gauges.coachTrust;
+    const playerOvr = save.player.ovr;
 
-    // Sélection d'un bot performant pour les awards si le joueur ne l'est pas
-    const regionPlayerList = ALL_PLAYERS.filter(p => regionTeams.some(t => t.id === p.teamId));
-    const randomTopBot = regionPlayerList[Math.floor(Math.random() * regionPlayerList.length)] || { pseudo: 'Zen', teamId: 'eu_1' };
-    const botTeamName = regionTeams.find(t => t.id === randomTopBot.teamId)?.name || 'V-Hive';
+    const wasKicked = trust < COACH_TRUST_THRESHOLDS.KICKED;
+
+    // Filtrer les autres équipes de la même région (ou internationales si Tier 1)
+    const otherTeams = save.teams.filter((t) => t.id !== save.currentTeamId);
+    const offers: TransferOffer[] = [];
+
+    if (wasKicked) {
+        // VIRÉ PAR LE COACH IA : Le joueur n'a pas le choix, il doit partir dans une petite équipe (Tier 3 ou bas Tier 2)
+        const reboundTeams = otherTeams
+            .filter((t) => t.tier >= currentTeam.tier) // Équipes de niveau égal ou inférieur (Tier 3)
+            .sort((a, b) => Math.abs(a.ovr - playerOvr) - Math.abs(b.ovr - playerOvr))
+            .slice(0, 2);
+
+        reboundTeams.forEach((team) => {
+            offers.push({
+                teamId: team.id,
+                teamName: team.name,
+                teamTier: team.tier,
+                teamOvr: team.ovr,
+                offeredStatus: 'starter',
+                monthlySalary: 500,
+                reason: 'rebound_after_kick',
+            });
+        });
+
+        return {
+            updatedSave: {
+                ...save,
+                contractStatus: 'free_agent',
+                pendingOffers: offers,
+            },
+            wasKicked: true,
+            headline: `🚨 RUPTURE DE CONTRAT : ${currentTeam.coachName} et ${currentTeam.name} ont décidé de te virer (Confiance : ${trust}/100). Tu dois trouver un nouveau club !`,
+        };
+    }
+
+    // NON VIRÉ : On cherche des offres logiques par rapport à son OVR et sa confiance
+    const targetTier: TeamTier =
+        trust >= 70 && playerOvr >= 70 && currentTeam.tier > 1
+            ? ((currentTeam.tier - 1) as TeamTier)
+            : currentTeam.tier;
+
+    const logicalTeams = otherTeams
+        .filter(
+            (t) =>
+                t.tier === targetTier ||
+                Math.abs(t.ovr - playerOvr) <= 8
+        )
+        .sort((a, b) => Math.abs(a.ovr - playerOvr) - Math.abs(b.ovr - playerOvr))
+        .slice(0, 3);
+
+    logicalTeams.forEach((team) => {
+        const isPromotion = team.tier < currentTeam.tier || team.ovr > currentTeam.ovr + 3;
+        offers.push({
+            teamId: team.id,
+            teamName: team.name,
+            teamTier: team.tier,
+            teamOvr: team.ovr,
+            offeredStatus: 'starter',
+            monthlySalary: team.tier === 1 ? 3500 : team.tier === 2 ? 1500 : 750,
+            reason: isPromotion ? 'promotion' : 'lateral',
+        });
+    });
 
     return {
-        winningTeam: winnerTeam,
-        mvp: playerRating >= 9.0 ? { pseudo: playerPseudo, teamName: playerTeamName, rating: playerRating } : { pseudo: randomTopBot.pseudo, teamName: botTeamName, rating: 9.4 },
-        topScorer: playerGoals >= 6 ? { pseudo: playerPseudo, teamName: playerTeamName, goals: playerGoals } : { pseudo: randomTopBot.pseudo, teamName: botTeamName, goals: Math.floor(Math.random() * 4) + 7 },
-        topPlaymaker: { pseudo: randomTopBot.pseudo, teamName: botTeamName, assists: Math.floor(Math.random() * 3) + 5 },
+        updatedSave: {
+            ...save,
+            pendingOffers: offers,
+        },
+        wasKicked: false,
+        headline:
+            trust >= 75
+                ? `🌟 MERCATO : Tes performances attirent l'œil de meilleures structures ! Tu peux signer ailleurs ou prolonger chez ${currentTeam.name}.`
+                : `📋 MERCATO FIN DE SPLIT : ${currentTeam.name} souhaite te conserver, mais d'autres équipes ont aussi envoyé une offre.`,
+    };
+}
+
+/**
+ * Applique le choix du joueur lors du Mercato (Rester ou Changer d'équipe)
+ * et passe au Split suivant (ou à la Saison suivante après le Split 3).
+ */
+export function acceptTransferOrStay(
+    save: CareerSave,
+    targetTeamId: string
+): { updatedSave: CareerSave; summaryMessage: string } {
+    const isStaying = targetTeamId === save.currentTeamId;
+    const chosenOffer = save.pendingOffers?.find((o) => o.teamId === targetTeamId);
+
+    let updatedTeams: Team[] = [...save.teams];
+
+    if (!isStaying) {
+        // 1. Retirer le joueur de son ancienne équipe
+        updatedTeams = updatedTeams.map((team) => {
+            if (team.id === save.currentTeamId) {
+                const remaining = team.roster.filter((p) => !p.isUser);
+                return { ...team, roster: remaining };
+            }
+            return team;
+        });
+
+        // 2. Insérer le joueur comme Titulaire dans sa nouvelle équipe (Règle des 2/3 conservée par ses 2 nouveaux mates)
+        updatedTeams = updatedTeams.map((team) => {
+            if (team.id === targetTeamId) {
+                const mates = team.roster.filter((p) => !p.isUser).slice(0, 2);
+                const benched = team.roster.filter((p) => !p.isUser)[2];
+                const newRoster = [save.player, ...mates, ...(benched ? [benched] : [])];
+                const newOvr = Math.round(
+                    (save.player.ovr + mates[0].ovr + mates[1].ovr) / 3
+                );
+                return {
+                    ...team,
+                    ovr: newOvr,
+                    roster: newRoster,
+                };
+            }
+            return team;
+        });
+    }
+
+    // Avancement du Split / de la Saison
+    let nextSplit = save.split;
+    let nextSeason = save.season;
+    let nextAge = save.player.age;
+    const newTrophies = [...save.careerHistory.trophies];
+    let worldsNote = '';
+
+    if (save.split === 3) {
+        // Fin de la saison -> Vérification de la qualification aux Worlds (Top 5 de la région)
+        const targetTeam = updatedTeams.find((t) => t.id === targetTeamId)!;
+        const regionStandings = updatedTeams
+            .filter((t) => t.region === targetTeam.region)
+            .sort((a, b) => b.rlcsPoints - a.rlcsPoints);
+
+        const rank = regionStandings.findIndex((t) => t.id === targetTeam.id) + 1;
+        if (rank <= 5 && targetTeam.tier === 1) {
+            newTrophies.push(`S${save.season} World Championship Contender (${targetTeam.tag})`);
+            worldsNote = ` 🏆 Saison terminée dans le Top ${rank} (${targetTeam.region}) : Qualification aux Worlds validée !`;
+        } else {
+            worldsNote = ` Fin de la Saison ${save.season} (Classé #${rank} en ${targetTeam.region}).`;
+        }
+
+        nextSeason += 1;
+        nextSplit = 1;
+        nextAge += 1;
+
+        // Réinitialiser les points RLCS en début de nouvelle saison
+        updatedTeams = updatedTeams.map((t) => ({ ...t, rlcsPoints: 0 }));
+    } else {
+        nextSplit = (save.split + 1) as 1 | 2 | 3;
+    }
+
+    const newSalary = chosenOffer ? chosenOffer.monthlySalary : save.monthlySalary;
+    const newTeamObj = updatedTeams.find((t) => t.id === targetTeamId)!;
+
+    const updatedSave: CareerSave = {
+        ...save,
+        updatedAt: new Date().toISOString(),
+        currentTeamId: targetTeamId,
+        contractStatus: 'starter',
+        monthlySalary: newSalary,
+        money: save.money + newSalary, // Versement du salaire de fin de split
+        season: nextSeason,
+        split: nextSplit,
+        week: 1,
+        player: {
+            ...save.player,
+            age: nextAge,
+        },
+        gauges: {
+            energy: 100, // Repos inter-split
+            feeling: Math.max(55, save.gauges.feeling),
+            coachTrust: isStaying ? save.gauges.coachTrust : 55, // Reset à 55 dans un nouveau club
+        },
+        teams: updatedTeams,
+        careerHistory: {
+            ...save.careerHistory,
+            trophies: newTrophies,
+        },
+        pendingOffers: undefined,
+    };
+
+    return {
+        updatedSave,
+        summaryMessage: isStaying
+            ? `✅ Tu prolonges l'aventure chez ${newTeamObj.name} pour le Split ${nextSplit} !${worldsNote}`
+            : `✍️ Nouveau départ ! Tu signes chez ${newTeamObj.name} (Tier ${newTeamObj.tier}) pour ${newSalary}€/mois.${worldsNote}`,
     };
 }
